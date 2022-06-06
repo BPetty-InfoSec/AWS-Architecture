@@ -1,0 +1,253 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+# -----------------------------------------------------------    METADATA    --------------------------------------------------------- #
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+# ---------------------------------------------------------    PARAMETERS    --------------------------------------------------------- #
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+
+Parameters:
+  EnvironmentType:
+    Type: String
+    AllowedValues:
+      - Development
+      - Production
+  CIDRBlockVPC:
+    Type: String
+    Default: 10.0.0.0/16
+  CIDRBlockPublicSubnet1:
+    Type: String
+    Default: 10.0.10.0/24
+  CIDRBlockPublicSubnet2:
+    Type: String
+    Default: 10.0.40.0/24
+  CIDRBlockPrivateNATSubnet1:
+    Type: String
+    Default: 10.0.20.0/24
+  CIDRBlockPrivateNATSubnet2:
+    Type: String
+    Default: 10.0.50.0/24
+  CIDRBlockPrivateSubnet1:
+    Type: String
+    Default: 10.0.30.0/24
+  CIDRBlockPrivateSubnet2:
+    Type: String
+    Default: 10.0.60.0/24
+
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+# ------------------------------------------------------------    RULES    ----------------------------------------------------------- #
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+# -----------------------------------------------------------    MAPPINGS    --------------------------------------------------------- #
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+# ---------------------------------------------------------    CONDITIONS    --------------------------------------------------------- #
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+
+Conditions:
+  CreateProdResources: !Equals [!Ref EnvironmentType, Production]
+
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+# ----------------------------------------------------------    TRANSFORM    --------------------------------------------------------- #
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+# ---------------------------------------------------------    RESOURCES    ---------------------------------------------------------- #
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+
+Resources:
+
+# ~~~~~~~~~~---------------------------------------------------    VPC    ------------------------------------------------------------ #
+
+  # The VPC for the BPetty.tech website. Set up for HA.
+  BPettyTechVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref CIDRBlockVPC
+
+# ~~~~~~~~~~-------------------------------------------------    SUBNETS    ---------------------------------------------------------- #
+
+  # 1st Public Subnet
+  BPTSubnetPublic1:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      VpcId: !Ref BPettyTechVPC
+      CidrBlock: !Ref CIDRBlockPublicSubnet1
+  # 2nd Public Subnet for HA
+  BPTSubnetPublic2:
+    Type: AWS::EC2::Subnet
+    Condition: CreateProdResources
+    Properties: 
+      VpcId: !Ref BPettyTechVPC
+      CidrBlock: !Ref CIDRBlockPublicSubnet2
+  # 1st Private NAT Subnet
+  BPTSubnetPrivateNAT1:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      VpcId: !Ref BPettyTechVPC
+      CidrBlock: !Ref CIDRBlockPrivateNATSubnet1
+  # 2nd Private NAT Subnet for HA
+  BPTSubnetPrivateNAT2:
+    Type: AWS::EC2::Subnet
+    Condition: CreateProdResources
+    Properties: 
+      VpcId: !Ref BPettyTechVPC
+      CidrBlock: !Ref CIDRBlockPrivateNATSubnet2
+  # 1st Private Subnet
+  BPTSubnetPrivate1:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      VpcId: !Ref BPettyTechVPC
+      CidrBlock: !Ref CIDRBlockPrivateSubnet1
+  # 2nd Private Subnet for HA
+  BPTSubnetPrivate2:
+    Type: AWS::EC2::Subnet
+    Condition: CreateProdResources
+    Properties: 
+      VpcId: !Ref BPettyTechVPC
+      CidrBlock: !Ref CIDRBlockPrivateSubnet2
+
+# ~~~~~~~~~~-------------------------------------------    NETWORKING HARDWARE    ---------------------------------------------------- #
+
+  # The Internet Gateway for the VPC
+  BPTIGW:
+    Type: AWS::EC2::InternetGateway
+    Properties: {}
+  # NAT Gateway to allow connection to the web server in the Private subnet
+  BPTNATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      SubnetId: !Ref BPTSubnetPublic1
+
+# ~~~~~~~~~~----------------------------------------    ROUTING TABLE AND ROUTES    -------------------------------------------------- #
+
+
+  # Routing table for the VPC
+  BPTRoutingTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref BPettyTechVPC
+  # Primary public route
+  BPTRoutePublic:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref BPTRoutingTable
+      GatewayId: !Ref BPTIGW
+      DestinationCidrBlock: 0.0.0.0/0
+  # Route for the Private Subnet. Only allows traffic from those with the BPTDBSG Security Group
+  BPTRoutePrivate:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref BPTRoutingTable
+  # Route for the Private NAT Subnet - links subnet to NAT Gateway
+  BPTRoutePrivateNAT:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref BPTRoutingTable
+      GatewayId: !Ref BPTNATGateway
+
+# ~~~~~~~~~~---------------------------------------------    SECURITY GROUPS    ------------------------------------------------------ #
+
+  # Security Group for the Web Server to talk to the wider internet
+  BPTWebServerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allows the web server to be reached by the wider internet
+      GroupName: BPTWebServerSG
+      VpcId: !Ref BPettyTechVPC
+      # Rules Section
+      # Allow any traffic in to the subnet on ports 80 or 443, and 22 from inside the vpc.
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIpv6: ::/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.0.0.0/16
+  # Security Group for the Web Server to talk to the Database in its secure subnet
+  BPTDBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Description that allows the database in the fully private subnet to talk to the Web Server in the mostly private subnet
+      GroupName: BPTDBSG
+      VpcId: !Ref BPettyTechVPC
+      # Allow traffic in and out only on port 80, and from members of the web server security group
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          DestinationSecurityGroupId: !GetAtt BPTWebServerSG.GroupId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !GetAtt BPTWebServerSG.GroupId
+
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+# -----------------------------------------------------------    OUTPUTS    ---------------------------------------------------------- #
+# ------------------------------------------------------------------------------------------------------------------------------------ #
+
+Outputs:
+  VpcID:
+    Description: ID of the VPC for the BPetty.tech network
+    Value: !Ref BPettyTechVPC
+    Export: 
+      Name: !Ref BPettyTechVPC
+  VpcIP:
+    Description: IP address range in CIDR notation for the VPC
+    Value: !GetAtt BPettyTechVPC.CidrBlock
+    Export: 
+      Name: !GetAtt BPettyTechVPC.CidrBlock
+  AZPublicSubnet1:
+    Description: Availability Zone for Public Subnet #1
+    Value: !GetAtt BPTSubnetPublic1.AvailabilityZone
+    Export: 
+      Name: !GetAtt BPTSubnetPublic1.AvailabilityZone
+  AZPrivateNATSubnet1:
+    Description: Availability Zone for Private NAT Subnet #1
+    Value: !GetAtt BPTSubnetPrivateNAT1.AvailabilityZone
+    Export: 
+      Name: !GetAtt BPTSubnetPrivateNAT1.AvailabilityZone
+  AZPrivateSubnet1:
+    Description: Availability Zone for Private Subnet #1
+    Value: !GetAtt BPTSubnetPrivate1.AvailabilityZone
+    Export: 
+      Name: !GetAtt BPTSubnetPrivate1.AvailabilityZone
+  AZPublicSubnet2:
+    Description: Availability Zone for Public Subnet #2
+    Condition: CreateProdResources
+    Value: !GetAtt BPTSubnetPublic2.AvailabilityZone
+    Export:
+      Name: !GetAtt BPTSubnetPrivateNAT1.AvailabilityZone
+  AZPrivateNATSubnet2:
+    Description: Availability Zone for Private NAT Subnet #2
+    Condition: CreateProdResources
+    Value: !GetAtt BPTSubnetPrivateNAT2.AvailabilityZone
+    Export:
+      Name: !GetAtt BPTSubnetPrivateNAT2.AvailabilityZone
+  AZPrivateSubnet2:
+    Description: Availability Zone for Private Subnet #2
+    Condition: CreateProdResources
+    Value: !GetAtt BPTSubnetPrivate2.AvailabilityZone
+    Export:
+      Name: !GetAtt BPTSubnetPrivate2.AvailabilityZone
+  WebServerSG:
+    Description: Exported ID for the Web Server Security Group
+    Value: !GetAtt BPTWebServerSG.GroupId
+    Export:
+      Name: !GetAtt BPTWebServerSG.GroupId
+  DBSG:
+    Description: Exported ID for the Database Security Group
+    Value: !GetAtt BPTDBSG.GroupId
+    Export:
+      Name: !GetAtt BPTDBSG.GroupId
